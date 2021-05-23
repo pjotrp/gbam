@@ -3,6 +3,11 @@
 use crate::{U16_SIZE, U32_SIZE, U8_SIZE};
 use byteorder::{LittleEndian, ReadBytesExt};
 
+// SAM/BAM tags are optional fields that go with each BAM read, such
+// as quality and alignment scores, part of the
+// [specification](https://samtools.github.io/hts-specs/SAMtags.pdf).
+// There is also a flag for long CIGARs.
+
 enum TagType {
     /// Char
     A,
