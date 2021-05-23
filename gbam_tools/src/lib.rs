@@ -1,4 +1,8 @@
-//! This crate contains tools for interacting with GBAM file format.
+//! This crate contains methods for generating, parsing and
+//! interacting with the GBAM file format --- an efficient file format
+//! for DNA/RNA sequence alignments. See the
+//! [project](https://github.com/NickRoz1/gbam/blob/master/README.md).
+
 #![allow(missing_docs)]
 
 use self::Fields::*;

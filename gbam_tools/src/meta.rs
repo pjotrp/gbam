@@ -1,3 +1,6 @@
+/// Every GBAM file has a metadata block that contains a record in a
+/// JSON format and is parsed/written with [Serde](https://serde.rs/).
+
 use super::GBAM_MAGIC;
 use crate::{field_item_size, Fields, U32_SIZE, U64_SIZE};
 use byteorder::{LittleEndian, ReadBytesExt, WriteBytesExt};
