@@ -2,7 +2,8 @@
 /// JSON format and is parsed/written with [Serde](https://serde.rs/).
 
 use super::GBAM_MAGIC;
-use crate::{field_item_size, Fields, U32_SIZE, U64_SIZE};
+use crate::{U32_SIZE, U64_SIZE};
+use bam_tools::record::fields::{field_item_size, Fields, FIELDS_NUM};
 use byteorder::{LittleEndian, ReadBytesExt, WriteBytesExt};
 use serde::ser::{SerializeMap, Serializer};
 use serde::{Deserialize, Deserializer, Serialize};
@@ -32,7 +33,10 @@ impl FileInfo {
 }
 
 /// The GBAM magic size is 8 bytes (U64_SIZE).
+#[cfg(not(feature = "python-ffi"))]
 pub const FILE_INFO_SIZE: usize = U64_SIZE + U32_SIZE * 2 + U64_SIZE + U32_SIZE;
+#[cfg(feature = "python-ffi")]
+pub const FILE_INFO_SIZE: usize = 28;
 
 impl From<&[u8]> for FileInfo {
     fn from(bytes: &[u8]) -> Self {
@@ -40,7 +44,9 @@ impl From<&[u8]> for FileInfo {
             bytes.len() == FILE_INFO_SIZE,
             "Not enough bytes to form file info struct.",
         );
-        assert_eq!(&bytes[..U64_SIZE], GBAM_MAGIC);
+        if &bytes[..U64_SIZE] != GBAM_MAGIC {
+            panic!("The file GBAM_MAGIC is not correct. Are you trying to open GBAM file or BAM file?");
+        }
         let mut ver1 = &bytes[U64_SIZE..];
         let mut ver2 = &bytes[U64_SIZE + U32_SIZE..];
         let mut seekpos = &bytes[U64_SIZE + 2 * U32_SIZE..];
@@ -77,23 +83,62 @@ impl Into<Vec<u8>> for FileInfo {
 }
 
 /// Type of encoding used in GBAM writer
-#[derive(Serialize, Deserialize, Clone)]
+/// TODO: use MessagePack or another compact form of serialization.
+#[derive(Serialize, Deserialize, Clone, Copy)]
 pub enum Codecs {
     /// Gzip encoding
     Gzip,
     /// LZ4 encoding
     Lz4,
 }
-#[derive(Serialize, Deserialize)]
+
+#[derive(Serialize, Deserialize, Clone, Debug)]
+/// Currently block stats only for RefID or POS are supported.
+pub(crate) struct Stat {
+    pub min_value: i32,
+    pub max_value: i32,
+}
+
+impl Stat {
+    pub fn update(&mut self, val: i32) {
+        self.max_value = std::cmp::max(val, self.max_value);
+        self.min_value = std::cmp::min(val, self.min_value);
+    }
+
+    /// Checks if it's in reset state.
+    #[allow(dead_code)]
+    pub fn is_reset(&self) -> bool {
+        (self.min_value == std::i32::MAX) && (self.max_value == std::i32::MIN)
+    }
+
+    #[allow(dead_code)]
+    pub fn reset(&mut self) {
+        self.min_value = std::i32::MAX;
+        self.max_value = std::i32::MIN;
+    }
+}
+
+impl Default for Stat {
+    fn default() -> Self { 
+        Self {
+            min_value:std::i32::MAX,
+            max_value:std::i32::MIN,
+        }
+    }
+}
+
+#[derive(Serialize, Deserialize, Clone, Default)]
 pub(crate) struct BlockMeta {
     pub seekpos: u64,
     pub numitems: u32,
+    pub block_size: u32,
+    pub uncompressed_size: u64,
+    pub stats: Option<Stat>,
 }
 
-#[derive(Serialize, Deserialize)]
-struct FieldMeta {
+#[derive(Serialize, Deserialize, Clone)]
+pub(crate) struct FieldMeta {
     item_size: Option<u32>, // NONE for variable sized fields
-    blocks_sizes: Vec<u32>, // NONE for fixed sized fields
     codec: Codecs,
     blocks: Vec<BlockMeta>,
 }
@@ -101,20 +146,75 @@ struct FieldMeta {
 impl FieldMeta {
     pub fn new(field: &Fields, codec: Codecs) -> Self {
         FieldMeta {
-            item_size: match field_item_size(field) {
-                Some(v) => Some(v as u32), // TODO.
-                None => None,
-            },
-            blocks_sizes: Vec::<u32>::new(),
+            item_size: field_item_size(field).map(|v| v as u32), // TODO
             codec,
             blocks: Vec::<BlockMeta>::new(),
         }
     }
 }
 
-#[derive(Serialize, Deserialize)]
+impl Default for FieldMeta {
+    fn default() -> Self {
+        FieldMeta {
+            item_size: None,
+            codec: Codecs::Gzip,
+            blocks: Vec::<BlockMeta>::new(),
+        }
+    }
+}
+
+#[derive(Deserialize, Serialize, Clone)]
 pub(crate) struct FileMeta {
-    field_to_meta: HashMap<Fields, FieldMeta>,
+    // Improvised hashmap for speed
+    #[serde(
+        deserialize_with = "from_str",
+        serialize_with = "serialize_field_to_meta"
+    )]
+    field_to_meta: [FieldMeta; FIELDS_NUM],
+    sam_header: Vec<u8>,
+    name_to_ref_id: Vec<(String, u32)>,
+}
+
+impl FileMeta {
+    pub fn get_ref_seqs(&self) -> &Vec<(String, u32)> {
+        &self.name_to_ref_id
+    }
+
+    #[allow(dead_code)]
+    pub fn get_sam_header(&self) -> &[u8] {
+        &self.sam_header[..]
+    }
+}
+
+// To make metadata easier to read, convert to json where fields are represented
+// as strings with their names, not numbers in enum.
+
+fn serialize_field_to_meta<S>(
+    meta: &[FieldMeta; FIELDS_NUM],
+    serializer: S,
+) -> Result<S::Ok, S::Error>
+where
+    S: Serializer,
+{
+    let mut map = FieldMetaMap(HashMap::new());
+    for field in Fields::iterator() {
+        map.0.insert(*field, meta[*field as usize].clone());
+    }
+    map.serialize(serializer)
+}
+
+fn from_str<'de, D>(deserializer: D) -> Result<[FieldMeta; FIELDS_NUM], D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let mut map = FieldMetaMap::deserialize(deserializer)?;
+    let mut field_to_meta: [FieldMeta; FIELDS_NUM] = Default::default();
+
+    for field in Fields::iterator() {
+        field_to_meta[*field as usize] = map.0.remove(field).unwrap();
+    }
+
+    Ok(field_to_meta)
 }
 
 /// This is a wrapper struct. It is necessary to create custom serializer/deserializer in Serde.
@@ -179,44 +279,34 @@ impl<'de> Deserialize<'de> for FieldMetaMap {
 }
 
 impl FileMeta {
-    pub fn new(codec: Codecs) -> Self {
-        let mut map = HashMap::<Fields, FieldMeta>::new();
+    pub fn new(codec: Codecs, ref_seqs: Vec<(String, u32)>, sam_header: Vec<u8>) -> Self {
+        let mut map: [FieldMeta; FIELDS_NUM] = Default::default();
         for field in Fields::iterator() {
-            map.insert(*field, FieldMeta::new(field, codec.clone()));
+            map[*field as usize] = FieldMeta::new(field, codec);
         }
-        FileMeta { field_to_meta: map }
+
+        FileMeta {
+            field_to_meta: map,
+            sam_header,
+            name_to_ref_id: ref_seqs,
+        }
     }
 
     /// Used to retrieve BlockMeta vector mutable borrow, to push new blocks
     /// directly into it, avoiding field matching.
     pub fn get_blocks(&mut self, field: &Fields) -> &mut Vec<BlockMeta> {
-        &mut self.field_to_meta.get_mut(field).unwrap().blocks
+        &mut self.field_to_meta[*field as usize].blocks
     }
 
     pub fn view_blocks(&self, field: &Fields) -> &Vec<BlockMeta> {
-        &self.field_to_meta[field].blocks
+        &self.field_to_meta[*field as usize].blocks
     }
 
     pub fn get_field_size(&self, field: &Fields) -> &Option<u32> {
-        &self.field_to_meta[field].item_size
+        &self.field_to_meta[*field as usize].item_size
     }
 
     pub fn get_field_codec(&self, field: &Fields) -> &Codecs {
-        &self.field_to_meta[field].codec
-    }
-    pub fn get_blocks_sizes(&mut self, field: &Fields) -> &mut Vec<u32> {
-        self.field_to_meta
-            .get_mut(field)
-            .unwrap()
-            .blocks_sizes
-            .as_mut()
-    }
-
-    pub fn push_block_size(&mut self, field: &Fields, size: usize) {
-        self.field_to_meta
-            .get_mut(field)
-            .unwrap()
-            .blocks_sizes
-            .push(size as u32);
+        &self.field_to_meta[*field as usize].codec
     }
 }

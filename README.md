@@ -9,52 +9,51 @@ This package includes tools for creating and manipulating GBAM files. GBAM is a 
 ```shell
 git clone https://github.com/NickRoz1/gbam
 cd gbam
-cd gbam_binary
-cargo build
-cargo test
-../target/debug/gbam_binary --help
+cargo build --release
+./target/release/gbam_binary --help
 ```
 
-You may need to set the C compiler with
-
+You may need to install following packages:
 ```shell
-env CC=gcc cargo build
-```
-
-To build the `libgbam_tools.so` library you can run cargo in the
-`gbam_tools` directory.
-
-
-## With Python tools
-
-```shell
-git clone https://github.com/NickRoz1/gbam
-cd gbam
-cd gbam_tools
-python3 -m venv env
-source env/bin/activate
-pip3 install maturin
-maturin develop --release
+sudo apt-get install liblzma-dev
+sudo apt-get install libbz2-dev
 ```
 
 # Usage
 
-### To convert BAM file to GBAM file
+### Examples
 ```shell
-python3 test_python_ffi.py conv -i test_data/input.bam -o test_data/output.gbam
+# Simply convert
+time ./target/release/gbam_binary -c test.bam -o test.gbam
+
+# Sort before writing (sort by reference and coordinates (other sort predicates are available, but not implemented in CLI currently))
+time ./target/release/gbam_binary -c -s 1gb.bam -o 1gb.sorted.gbam --sort-temp-mode [lz4_file|file|lz4_ram|ram]
+
+# Collect flag statistics
+time ./target/release/gbam_binary --flagstat test.gbam
+
+# Calculate read depth (only on sorted files)
+time ./target/release/gbam_binary --depth test.sorted.gbam --thread-num 4 > depth_test.txt
+
+# Calculate read depth (only on sorted files) and create bed regions depth gzip file
+time ./target/release/gbam_binary --depth test.sorted.gbam --thread-num 4 -o test_data/depth_test.bed.gz
 ```
-### To test whether the GBAM file contains correct info and whether it iterates properly
+
+### To run pytests
 ```shell
-python3 test_python_ffi.py test -i test_data/input.bam
+# Run all tests
+pytest
+
+# Test sort on user provided file (slow)
+pytest -k test_sort --bam-file-path=/home/test/testing_big_file/test.bam
+
+# Test conversion bam to gbam to bam (preserving correct data) on user provided file
+pytest -k test_bam_to_gbam_to_bam --bam-file-path=/home/test/testing_big_file/test.bam
 ```
 
 # Development
 
-## virtualenv
-
-maturin can use python's virtualenv. See above instructions for Python install.
-
-## GNU Guix
+## GNU Guix - this is not tested.
 
 GNU Guix provides a full environment for development.  See
 [.guix-build](./.guix-build)
