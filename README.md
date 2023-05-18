@@ -55,5 +55,17 @@ pytest -k test_bam_to_gbam_to_bam --bam-file-path=/home/test/testing_big_file/te
 
 ## GNU Guix - this is not tested.
 
+
+
 GNU Guix provides a full environment for development.  See
 [.guix-build](./.guix-build)
+
+by hand:
+
+```
+  mkdir ~/opt ; /home/wrk/opt/guix-pull/bin/guix pull -p ~/opt/guix-pull
+  source ~/opt/guix-pull/etc/profile
+  guix environment -C --network guix rust --ad-hoc python python-pip nss-certs openssl git gcc-toolchain clang vim which python-cffi
+  export CC=gcc
+  cargo build
+```
